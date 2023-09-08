@@ -3,7 +3,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-use core::{fmt, marker::PhantomData};
+use core::{fmt, marker::PhantomData, mem::MaybeUninit};
 
 use arrayvec::ArrayString;
 use bytemuck::AnyBitPattern;
@@ -126,7 +126,9 @@ impl<T> Array<T> {
     pub fn size(&self) -> u32 {
         self.size
     }
+}
 
+impl<T: AnyBitPattern> Array<T> {
     pub fn iter<R: MemReader>(self, reader: R) -> ArrayIter<T, R> {
         let start = self.addr + Self::DATA;
         let end = start + (core::mem::size_of::<T>() * self.size as usize) as u64;
@@ -137,6 +139,18 @@ impl<T> Array<T> {
             reader,
             _t: PhantomData,
         }
+    }
+
+    pub fn get<R: MemReader>(self, reader: R, index: usize) -> Option<T> {
+        let offset = self.addr + Self::DATA + (index * core::mem::size_of::<T>()) as u64;
+        reader.read(offset)
+    }
+
+    pub unsafe fn as_slice<R: MemReader>(&self, reader: R) -> Option<&[MaybeUninit<T>]> {
+        let len = reader.read(self.addr + Self::SIZE)?;
+        let data = (self.addr + Self::DATA) as usize as *const MaybeUninit<T>;
+
+        Some(unsafe { ::core::slice::from_raw_parts(data, len) })
     }
 }
 
@@ -269,6 +283,16 @@ impl<T> List<T> {
 impl<T: AnyBitPattern + 'static> List<T> {
     pub fn iter(self, reader: impl MemReader) -> impl Iterator<Item = T> {
         self.items.iter(reader).take(self.size as _)
+    }
+
+    pub fn get<R: MemReader>(self, reader: R, index: usize) -> Option<T> {
+        self.items.get(reader, index)
+    }
+
+    pub unsafe fn as_slice<R: MemReader>(&self, reader: R) -> Option<&[T]> {
+        let inner = unsafe { self.items.as_slice(reader)? };
+        let inner = &inner[..self.size as usize];
+        Some(unsafe { &*(inner as *const [MaybeUninit<T>] as *const [T]) })
     }
 }
 
