@@ -79,7 +79,7 @@ impl<T> Pointer<T> {
         }
     }
 
-    pub fn deref(self, reader: impl MemReader) -> Option<u64> {
+    pub fn deref<R: MemReader>(self, reader: &R) -> Option<u64> {
         if self.address == 0 {
             None
         } else {
@@ -126,7 +126,7 @@ impl<T> Array<T> {
 }
 
 impl<T: AnyBitPattern> Array<T> {
-    pub fn iter<R: MemReader>(self, reader: R) -> ArrayIter<T, R> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> ArrayIter<'_, T, R> {
         let start = self.addr + Self::DATA;
         let end = start + (core::mem::size_of::<T>() * self.size as usize) as u64;
 
@@ -138,7 +138,7 @@ impl<T: AnyBitPattern> Array<T> {
         }
     }
 
-    pub fn get<R: MemReader>(self, reader: R, index: usize) -> Option<T> {
+    pub fn get<R: MemReader>(self, reader: &R, index: usize) -> Option<T> {
         let offset = self.addr + Self::DATA + (index * core::mem::size_of::<T>()) as u64;
         reader.read(offset)
     }
@@ -147,7 +147,7 @@ impl<T: AnyBitPattern> Array<T> {
     ///
     /// This function is essentialy a `transmute` and thus is unsafe.
     /// All the safety requirements of `transmute` apply here.
-    pub unsafe fn as_slice<R: MemReader>(&self, reader: R) -> Option<&[MaybeUninit<T>]> {
+    pub unsafe fn as_slice<R: MemReader>(&self, reader: &R) -> Option<&[MaybeUninit<T>]> {
         let len = reader.read(self.addr + Self::SIZE)?;
         let data = (self.addr + Self::DATA) as usize as *const MaybeUninit<T>;
 
@@ -166,14 +166,14 @@ impl<T> Resolve for Array<T> {
     }
 }
 
-pub struct ArrayIter<T, R> {
+pub struct ArrayIter<'a, T, R> {
     pos: u64,
     end: u64,
-    reader: R,
+    reader: &'a R,
     _t: PhantomData<T>,
 }
 
-impl<T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<T, R> {
+impl<'a, T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<'a, T, R> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -207,7 +207,7 @@ impl CSString {
         self.size
     }
 
-    pub fn chars(self, reader: impl MemReader) -> impl Iterator<Item = char> {
+    pub fn chars<R: MemReader>(self, reader: &R) -> impl Iterator<Item = char> + '_ {
         let start = self.addr + Self::DATA;
         let end = start + u64::from(2 * self.size);
 
@@ -220,7 +220,7 @@ impl CSString {
         char::decode_utf16(utf16).map(|o| o.unwrap_or(char::REPLACEMENT_CHARACTER))
     }
 
-    pub fn to_string<const CAP: usize>(self, reader: impl MemReader) -> ArrayString<CAP> {
+    pub fn to_string<R: MemReader, const CAP: usize>(self, reader: &R) -> ArrayString<CAP> {
         let mut s = ArrayString::new();
         for c in self.chars(reader) {
             match s.try_push(c) {
@@ -232,7 +232,7 @@ impl CSString {
     }
 
     #[cfg(feature = "alloc")]
-    pub fn to_std_string(self, reader: impl MemReader) -> ::alloc::string::String {
+    pub fn to_std_string<R: MemReader>(self, reader: &R) -> ::alloc::string::String {
         self.chars(reader).collect()
     }
 }
@@ -278,11 +278,11 @@ impl<T> List<T> {
 }
 
 impl<T: AnyBitPattern + 'static> List<T> {
-    pub fn iter(self, reader: impl MemReader) -> impl Iterator<Item = T> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> impl Iterator<Item = T> + '_ {
         self.items.iter(reader).take(self.size as _)
     }
 
-    pub fn get<R: MemReader>(self, reader: R, index: usize) -> Option<T> {
+    pub fn get<R: MemReader>(self, reader: &R, index: usize) -> Option<T> {
         self.items.get(reader, index)
     }
 
@@ -290,7 +290,7 @@ impl<T: AnyBitPattern + 'static> List<T> {
     ///
     /// This function is essentialy a `transmute` and thus is unsafe.
     /// All the safety requirements of `transmute` apply here.
-    pub unsafe fn as_slice<R: MemReader>(&self, reader: R) -> Option<&[T]> {
+    pub unsafe fn as_slice<R: MemReader>(&self, reader: &R) -> Option<&[T]> {
         let inner = unsafe { self.items.as_slice(reader)? };
         let inner = &inner[..self.size as usize];
         Some(unsafe { &*(inner as *const [MaybeUninit<T>] as *const [T]) })
@@ -340,7 +340,7 @@ impl<K, V> Map<K, V> {
 }
 
 impl<K: AnyBitPattern + 'static, V: AnyBitPattern + 'static> Map<K, V> {
-    pub fn iter(self, reader: impl MemReader) -> impl Iterator<Item = (K, V)> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> impl Iterator<Item = (K, V)> + '_ {
         self.entries
             .iter(reader)
             .filter(|o| o._hash != 0 || o._next != 0)
@@ -387,7 +387,7 @@ impl<T> Set<T> {
 }
 
 impl<T: AnyBitPattern + 'static> Set<T> {
-    pub fn iter(self, reader: impl MemReader) -> impl Iterator<Item = T> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> impl Iterator<Item = T> + '_ {
         self.map.iter(reader).map(|o| o.0)
     }
 }
