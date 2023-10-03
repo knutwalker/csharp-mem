@@ -139,6 +139,10 @@ impl<T: AnyBitPattern> Array<T> {
         reader.read(offset)
     }
 
+    /// # Safety
+    ///
+    /// This function is essentialy a `transmute` and thus is unsafe.
+    /// All the safety requirements of `transmute` apply here.
     pub unsafe fn as_slice<R: MemReader>(&self, reader: R) -> Option<&[MaybeUninit<T>]> {
         let len = reader.read(self.addr + Self::SIZE)?;
         let data = (self.addr + Self::DATA) as usize as *const MaybeUninit<T>;
@@ -278,6 +282,10 @@ impl<T: AnyBitPattern + 'static> List<T> {
         self.items.get(reader, index)
     }
 
+    /// # Safety
+    ///
+    /// This function is essentialy a `transmute` and thus is unsafe.
+    /// All the safety requirements of `transmute` apply here.
     pub unsafe fn as_slice<R: MemReader>(&self, reader: R) -> Option<&[T]> {
         let inner = unsafe { self.items.as_slice(reader)? };
         let inner = &inner[..self.size as usize];
