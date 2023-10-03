@@ -17,7 +17,7 @@ pub trait Binding<T> {
 }
 
 pub trait Resolve: Sized {
-    fn resolve(reader: impl MemReader, addr: u64) -> Option<Self>;
+    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self>;
 }
 
 #[repr(C)]
@@ -47,7 +47,7 @@ unsafe impl<T: 'static> ::bytemuck::AnyBitPattern for Pointer<T> {}
 unsafe impl<T> ::bytemuck::Zeroable for Pointer<T> {}
 
 impl<T: Resolve> Pointer<T> {
-    pub fn resolve(self, reader: impl MemReader) -> Option<T> {
+    pub fn resolve<R: MemReader>(self, reader: &R) -> Option<T> {
         if self.address == 0 {
             None
         } else {
@@ -57,7 +57,7 @@ impl<T: Resolve> Pointer<T> {
 }
 
 impl<T: AnyBitPattern> Pointer<T> {
-    pub fn read(self, reader: impl MemReader) -> Option<T> {
+    pub fn read<R: MemReader>(self, reader: &R) -> Option<T> {
         if self.address == 0 {
             None
         } else {
@@ -156,7 +156,7 @@ impl<T: AnyBitPattern> Array<T> {
 }
 
 impl<T> Resolve for Array<T> {
-    fn resolve(reader: impl MemReader, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
         let size = reader.read(addr + Self::SIZE)?;
         Some(Self {
             addr,
@@ -238,7 +238,7 @@ impl CSString {
 }
 
 impl Resolve for CSString {
-    fn resolve(reader: impl MemReader, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
         let size = reader.read(addr + Self::SIZE)?;
         Some(Self { addr, size })
     }
@@ -298,7 +298,7 @@ impl<T: AnyBitPattern + 'static> List<T> {
 }
 
 impl<T: 'static> Resolve for List<T> {
-    fn resolve(reader: impl MemReader, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
         let size = reader.read(addr + Self::SIZE)?;
         let items = reader.read(addr + Self::ITEMS)?;
         let items = Array::resolve(reader, items)?;
@@ -350,7 +350,7 @@ impl<K: AnyBitPattern + 'static, V: AnyBitPattern + 'static> Map<K, V> {
 }
 
 impl<K: 'static, V: 'static> Resolve for Map<K, V> {
-    fn resolve(reader: impl MemReader, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
         let size = reader.read(addr + Self::SIZE)?;
         let entries = reader.read(addr + Self::ENTRIES)?;
         let entries = Array::resolve(reader, entries)?; // reader.resolve(entries)?;
@@ -393,8 +393,8 @@ impl<T: AnyBitPattern + 'static> Set<T> {
 }
 
 impl<T: 'static> Resolve for Set<T> {
-    fn resolve(reader: impl MemReader, addr: u64) -> Option<Self> {
-        let map = Map::resolve(reader, addr)?; // reader.resolve(addr)?;
+    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
+        let map = Map::resolve(reader, addr)?;
         Some(Self { map })
     }
 }
