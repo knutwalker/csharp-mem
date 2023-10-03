@@ -30,10 +30,7 @@ impl<T> Copy for Pointer<T> {}
 
 impl<T> Clone for Pointer<T> {
     fn clone(&self) -> Self {
-        Self {
-            address: self.address.clone(),
-            _t: PhantomData,
-        }
+        *self
     }
 }
 
@@ -101,11 +98,7 @@ impl<T> Copy for Array<T> {}
 
 impl<T> Clone for Array<T> {
     fn clone(&self) -> Self {
-        Self {
-            addr: self.addr.clone(),
-            size: self.size.clone(),
-            _t: PhantomData,
-        }
+        *self
     }
 }
 
@@ -253,11 +246,7 @@ impl<T> Copy for List<T> {}
 
 impl<T> Clone for List<T> {
     fn clone(&self) -> Self {
-        Self {
-            addr: self.addr.clone(),
-            items: self.items.clone(),
-            size: self.size.clone(),
-        }
+        *self
     }
 }
 
@@ -315,11 +304,7 @@ impl<K, V> Copy for Map<K, V> {}
 
 impl<K, V> Clone for Map<K, V> {
     fn clone(&self) -> Self {
-        Self {
-            addr: self.addr.clone(),
-            entries: self.entries.clone(),
-            size: self.size.clone(),
-        }
+        *self
     }
 }
 
@@ -373,9 +358,7 @@ impl<T> Copy for Set<T> {}
 
 impl<T> Clone for Set<T> {
     fn clone(&self) -> Self {
-        Self {
-            map: self.map.clone(),
-        }
+        *self
     }
 }
 
