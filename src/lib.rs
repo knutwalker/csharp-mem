@@ -175,7 +175,7 @@ impl<T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<T, R> {
 
         let item: T = self.reader.read(self.pos)?;
 
-        self.pos = self.pos + (core::mem::size_of::<T>() as u64);
+        self.pos += core::mem::size_of::<T>() as u64;
         Some(item)
     }
 
