@@ -80,7 +80,11 @@ impl<T> Pointer<T> {
     }
 
     pub fn deref(self, reader: impl MemReader) -> Option<u64> {
-        reader.read(self.address)
+        if self.address == 0 {
+            None
+        } else {
+            reader.read(self.address)
+        }
     }
 
     pub fn address_value(self) -> u64 {
