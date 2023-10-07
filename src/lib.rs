@@ -6,94 +6,17 @@ extern crate alloc;
 use core::{fmt, marker::PhantomData, mem::MaybeUninit};
 
 use arrayvec::ArrayString;
+use asr::{Address, Address64, MemReader, Resolve};
 use bytemuck::AnyBitPattern;
 
-pub trait MemReader: Sized {
-    fn read<T: AnyBitPattern>(&self, addr: u64) -> Option<T>;
-}
 
 pub trait Binding<T> {
     fn read(self, addr: u64) -> Option<T>;
 }
 
-pub trait Resolve: Sized {
-    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self>;
-}
-
-#[repr(C)]
-pub struct Pointer<T> {
-    address: u64,
-    _t: PhantomData<T>,
-}
-
-impl<T> Copy for Pointer<T> {}
-
-impl<T> Clone for Pointer<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> fmt::Debug for Pointer<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pointer")
-            .field("address", &self.address)
-            .field("type", &core::any::type_name::<T>())
-            .finish()
-    }
-}
-
-unsafe impl<T: 'static> ::bytemuck::AnyBitPattern for Pointer<T> {}
-unsafe impl<T> ::bytemuck::Zeroable for Pointer<T> {}
-
-impl<T: Resolve> Pointer<T> {
-    pub fn resolve<R: MemReader>(self, reader: &R) -> Option<T> {
-        if self.address == 0 {
-            None
-        } else {
-            T::resolve(reader, self.address)
-        }
-    }
-}
-
-impl<T: AnyBitPattern> Pointer<T> {
-    pub fn read<R: MemReader>(self, reader: &R) -> Option<T> {
-        if self.address == 0 {
-            None
-        } else {
-            reader.read(self.address)
-        }
-    }
-}
-
-impl<T> Pointer<T> {
-    pub fn resolve_with<R: Binding<T>>(self, binding: R) -> Option<T> {
-        self.resolve_as_with(binding)
-    }
-
-    pub fn resolve_as_with<U, R: Binding<U>>(self, binding: R) -> Option<U> {
-        if self.address == 0 {
-            None
-        } else {
-            binding.read(self.address)
-        }
-    }
-
-    pub fn deref<R: MemReader>(self, reader: &R) -> Option<u64> {
-        if self.address == 0 {
-            None
-        } else {
-            reader.read(self.address)
-        }
-    }
-
-    pub fn address_value(self) -> u64 {
-        self.address
-    }
-}
 
 pub struct Array<T> {
-    addr: u64,
+    addr: Address,
     size: u32,
     _t: PhantomData<T>,
 }
@@ -149,14 +72,15 @@ impl<T: AnyBitPattern> Array<T> {
     /// All the safety requirements of `transmute` apply here.
     pub unsafe fn as_slice<R: MemReader>(&self, reader: &R) -> Option<&[MaybeUninit<T>]> {
         let len = reader.read(self.addr + Self::SIZE)?;
-        let data = (self.addr + Self::DATA) as usize as *const MaybeUninit<T>;
+        let data = (self.addr + Self::DATA).value() as *const MaybeUninit<T>;
 
         Some(unsafe { ::core::slice::from_raw_parts(data, len) })
     }
 }
 
 impl<T> Resolve for Array<T> {
-    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
+        let addr = addr.into();
         let size = reader.read(addr + Self::SIZE)?;
         Some(Self {
             addr,
@@ -167,8 +91,8 @@ impl<T> Resolve for Array<T> {
 }
 
 pub struct ArrayIter<'a, T, R> {
-    pos: u64,
-    end: u64,
+    pos: Address,
+    end: Address,
     reader: &'a R,
     _t: PhantomData<T>,
 }
@@ -183,19 +107,19 @@ impl<'a, T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<'a, T, R> {
 
         let item: T = self.reader.read(self.pos)?;
 
-        self.pos += core::mem::size_of::<T>() as u64;
+        self.pos = self.pos + core::mem::size_of::<T>() as u64;
         Some(item)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.end.saturating_sub(self.pos) as usize;
+        let remaining = self.end.value().saturating_sub(self.pos.value()) as usize;
         (remaining, Some(remaining))
     }
 }
 
 #[derive(Copy, Clone, Debug)]
 pub struct CSString {
-    addr: u64,
+    addr: Address,
     size: u32,
 }
 
@@ -238,14 +162,15 @@ impl CSString {
 }
 
 impl Resolve for CSString {
-    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
+        let addr = addr.into();
         let size = reader.read(addr + Self::SIZE)?;
         Some(Self { addr, size })
     }
 }
 
 pub struct List<T> {
-    addr: u64,
+    addr: Address,
     items: Array<T>,
     size: u32,
 }
@@ -298,16 +223,17 @@ impl<T: AnyBitPattern + 'static> List<T> {
 }
 
 impl<T: 'static> Resolve for List<T> {
-    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
+        let addr = addr.into();
         let size = reader.read(addr + Self::SIZE)?;
-        let items = reader.read(addr + Self::ITEMS)?;
+        let items = reader.read::<Address64, _>(addr + Self::ITEMS)?;
         let items = Array::resolve(reader, items)?;
         Some(Self { addr, items, size })
     }
 }
 
 pub struct Map<K, V> {
-    addr: u64,
+    addr: Address,
     entries: Array<Entry<K, V>>,
     size: u32,
 }
@@ -350,9 +276,10 @@ impl<K: AnyBitPattern + 'static, V: AnyBitPattern + 'static> Map<K, V> {
 }
 
 impl<K: 'static, V: 'static> Resolve for Map<K, V> {
-    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
+        let addr = addr.into();
         let size = reader.read(addr + Self::SIZE)?;
-        let entries = reader.read(addr + Self::ENTRIES)?;
+        let entries = reader.read::<Address64, _>(addr + Self::ENTRIES)?;
         let entries = Array::resolve(reader, entries)?; // reader.resolve(entries)?;
         Some(Self {
             addr,
@@ -393,7 +320,7 @@ impl<T: AnyBitPattern + 'static> Set<T> {
 }
 
 impl<T: 'static> Resolve for Set<T> {
-    fn resolve<R: MemReader>(reader: &R, addr: u64) -> Option<Self> {
+    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
         let map = Map::resolve(reader, addr)?;
         Some(Self { map })
     }
