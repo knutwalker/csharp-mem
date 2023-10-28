@@ -12,6 +12,12 @@ use core::{
 use asr::{arrayvec::ArrayString, Address, Address64, Process};
 use bytemuck::{AnyBitPattern, CheckedBitPattern};
 
+#[cfg(feature = "il2cpp")]
+pub use il2cpp::*;
+
+#[cfg(feature = "mono")]
+pub use mono::*;
+
 /// Trait for things that can read data from memory.
 pub trait MemReader: Sized {
     /// Reads a value from memory.
@@ -21,6 +27,104 @@ pub trait MemReader: Sized {
 impl MemReader for Process {
     fn read<T: CheckedBitPattern, A: Into<Address>>(&self, addr: A) -> Option<T> {
         self.read(addr).ok()
+    }
+}
+
+#[cfg(feature = "il2cpp")]
+mod il2cpp {
+    use asr::{
+        game_engine::unity::il2cpp::{Image, Module},
+        Address, Process,
+    };
+    use bytemuck::CheckedBitPattern;
+
+    pub use csharp_mem_derive::Il2cppClass as Class;
+
+    impl super::MemReader for Game<'_> {
+        fn read<T: CheckedBitPattern, A: Into<Address>>(&self, addr: A) -> Option<T> {
+            self.process().read(addr).ok()
+        }
+    }
+    /// Represents a Unity game that is using the IL2CPP backend.
+    pub struct Game<'a> {
+        process: &'a Process,
+        module: Module,
+        image: Image,
+    }
+
+    impl<'a> Game<'a> {
+        /// Create a new [`Game`](Game)
+        pub const fn new(process: &'a Process, module: Module, image: Image) -> Self {
+            Self {
+                process,
+                module,
+                image,
+            }
+        }
+
+        /// Returns the [`Process`](Process) that the game is running in.
+        pub const fn process(&self) -> &'a Process {
+            self.process
+        }
+
+        /// Returns the [`Module`](Module) of this game.
+        pub const fn module(&self) -> &Module {
+            &self.module
+        }
+
+        /// Returns the [`Image`](Image) of this game.
+        pub const fn image(&self) -> &Image {
+            &self.image
+        }
+    }
+}
+
+#[cfg(feature = "mono")]
+mod mono {
+    use asr::{
+        game_engine::unity::mono::{Image, Module},
+        Address, Process,
+    };
+    use bytemuck::CheckedBitPattern;
+
+    pub use csharp_mem_derive::MonoClass as Class;
+
+    impl super::MemReader for Game<'_> {
+        fn read<T: CheckedBitPattern, A: Into<Address>>(&self, addr: A) -> Option<T> {
+            self.process().read(addr).ok()
+        }
+    }
+    /// Represents a Unity game that is using the Mono backend.
+    pub struct Game<'a> {
+        process: &'a Process,
+        module: Module,
+        image: Image,
+    }
+
+    impl<'a> Game<'a> {
+        /// Create a new [`Game`](Game)
+        pub const fn new(process: &'a Process, module: Module, image: Image) -> Self {
+            Self {
+                process,
+                module,
+                image,
+            }
+        }
+
+        /// Returns the [`Process`](Process) that the game is running in.
+        pub const fn process(&self) -> &'a Process {
+            self.process
+        }
+
+        /// Returns the [`Module`](Module) of this game.
+        pub const fn module(&self) -> &Module {
+            &self.module
+        }
+
+        /// Returns the [`Image`](Image) of this game.
+        pub const fn image(&self) -> &Image {
+            &self.image
+        }
     }
 }
 
