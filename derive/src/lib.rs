@@ -347,7 +347,7 @@ mod inner {
                         name: field_name,
                         typ: quote! { ::core::option::Option<::core::num::NonZeroU32> },
                         lookup: quote! {
-                            ::core::num::NonZeroU32::new(class.get_field(game.process(), game.module(), #lookup_name)?)
+                            ::core::num::NonZeroU32::new(class.get_field_offset(game.process(), game.module(), #lookup_name)?)
                                 .expect("A field with offset 0 in a unity project is not valid")
                         },
                         read: match singleton_name.as_ref() {
