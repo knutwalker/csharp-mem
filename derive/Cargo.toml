@@ -1,0 +1,19 @@
+[package]
+name = "csharp-mem-derive"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+syn = "2.0.38"
+quote = "1.0.33"
+proc-macro2 = "1.0.69"
+
+[lib]
+proc-macro = true
+
+
+[features]
+il2cpp = []
+mono = []
