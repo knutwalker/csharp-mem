@@ -3,66 +3,84 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-use core::{fmt, marker::PhantomData, mem::MaybeUninit};
+use core::{
+    fmt,
+    marker::PhantomData,
+    mem::{size_of, MaybeUninit},
+};
 
-use arrayvec::ArrayString;
-use asr::{Address, Address64, MemReader, Resolve};
-use bytemuck::AnyBitPattern;
+use asr::{arrayvec::ArrayString, Address, Address64, Process};
+use bytemuck::{AnyBitPattern, CheckedBitPattern};
 
-
-pub trait Binding<T> {
-    fn read(self, addr: u64) -> Option<T>;
+/// Trait for things that can read data from memory.
+pub trait MemReader: Sized {
+    /// Reads a value from memory.
+    fn read<T: CheckedBitPattern, A: Into<Address>>(&self, addr: A) -> Option<T>;
 }
 
+impl MemReader for Process {
+    fn read<T: CheckedBitPattern, A: Into<Address>>(&self, addr: A) -> Option<T> {
+        self.read(addr).ok()
+    }
+}
 
-pub struct Array<T> {
-    addr: Address,
-    size: u32,
+/// A pointer to a value in memory.
+/// This type has the same memory layout as an [`Address64`] and
+/// can be used in place of it, typically in classes derived when
+/// the `derive` feature is enabled and used.
+/// Using this type instead of [`Address64`] can give a bit more
+/// type safety.
+#[repr(C)]
+pub struct Pointer<T> {
+    address: Address64,
     _t: PhantomData<T>,
 }
 
-impl<T> Copy for Array<T> {}
-
-impl<T> Clone for Array<T> {
-    fn clone(&self) -> Self {
-        *self
+impl<T: CheckedBitPattern> Pointer<T> {
+    /// Read a value from memory by following this pointer.
+    pub fn read<R: MemReader>(self, reader: &R) -> Option<T> {
+        if self.address.is_null() {
+            None
+        } else {
+            reader.read(self.address)
+        }
     }
 }
 
-impl<T> fmt::Debug for Array<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Array")
-            .field("addr", &self.addr)
-            .field("size", &self.size)
-            .field("type", &core::any::type_name::<T>())
-            .finish()
+impl<T> Pointer<T> {
+    /// Return the address of this pointer.
+    pub const fn address(self) -> Address64 {
+        self.address
+    }
+
+    const unsafe fn cast<U>(self) -> Pointer<U> {
+        Pointer {
+            address: self.address,
+            _t: PhantomData,
+        }
     }
 }
 
-impl<T> Array<T> {
-    const SIZE: u64 = 0x18;
-    const DATA: u64 = 0x20;
+impl<T: CheckedBitPattern + 'static> Pointer<Array<T>> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> Option<ArrayIter<'_, T, R>> {
+        let array = self.read(reader)?;
+        let start = self.address() + Array::<T>::DATA;
+        let end = start + (size_of::<T>() * array.size as usize) as u64;
 
-    pub fn size(&self) -> u32 {
-        self.size
-    }
-}
-
-impl<T: AnyBitPattern> Array<T> {
-    pub fn iter<R: MemReader>(self, reader: &R) -> ArrayIter<'_, T, R> {
-        let start = self.addr + Self::DATA;
-        let end = start + (core::mem::size_of::<T>() * self.size as usize) as u64;
-
-        ArrayIter {
+        Some(ArrayIter {
             pos: start,
             end,
             reader,
             _t: PhantomData,
-        }
+        })
     }
 
     pub fn get<R: MemReader>(self, reader: &R, index: usize) -> Option<T> {
-        let offset = self.addr + Self::DATA + (index * core::mem::size_of::<T>()) as u64;
+        let array = self.read(reader)?;
+        if index >= array.size as usize {
+            return None;
+        }
+        let offset = self.address() + Array::<T>::DATA + (index * size_of::<T>()) as u64;
         reader.read(offset)
     }
 
@@ -70,34 +88,172 @@ impl<T: AnyBitPattern> Array<T> {
     ///
     /// This function is essentialy a `transmute` and thus is unsafe.
     /// All the safety requirements of `transmute` apply here.
-    pub unsafe fn as_slice<R: MemReader>(&self, reader: &R) -> Option<&[MaybeUninit<T>]> {
-        let len = reader.read(self.addr + Self::SIZE)?;
-        let data = (self.addr + Self::DATA).value() as *const MaybeUninit<T>;
+    pub unsafe fn as_slice<R: MemReader>(self, reader: &R) -> Option<&[MaybeUninit<T>]> {
+        let array = self.read(reader)?;
+        let len = array.size as usize;
+        let data = (self.address() + Array::<T>::DATA).value() as *const MaybeUninit<T>;
 
-        Some(unsafe { ::core::slice::from_raw_parts(data, len) })
+        Some(::core::slice::from_raw_parts(data, len))
     }
 }
 
-impl<T> Resolve for Array<T> {
-    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
-        let addr = addr.into();
-        let size = reader.read(addr + Self::SIZE)?;
-        Some(Self {
-            addr,
-            size,
-            _t: PhantomData,
-        })
+impl Pointer<CSString> {
+    pub fn chars<R: MemReader>(self, reader: &R) -> Option<impl Iterator<Item = char> + '_> {
+        let string = self.read(reader)?;
+        let start = self.address() + CSString::DATA;
+        let end = start + u64::from((size_of::<u16>() / size_of::<u8>()) as u32 * string.size);
+
+        let utf16 = ArrayIter {
+            pos: start,
+            end,
+            reader,
+            _t: PhantomData::<u16>,
+        };
+        Some(char::decode_utf16(utf16).map(|o| o.unwrap_or(char::REPLACEMENT_CHARACTER)))
+    }
+
+    pub fn to_string<R: MemReader, const CAP: usize>(self, reader: &R) -> Option<ArrayString<CAP>> {
+        let chars = self.chars(reader)?;
+        let mut s = ArrayString::new();
+        for c in chars {
+            match s.try_push(c) {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+        }
+        Some(s)
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn to_std_string<R: MemReader>(self, reader: &R) -> Option<::alloc::string::String> {
+        Some(self.chars(reader)?.collect())
     }
 }
+
+impl<T: CheckedBitPattern + 'static> Pointer<List<T>> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> Option<impl Iterator<Item = T> + '_> {
+        let list = self.read(reader)?;
+        Some(list.items.iter(reader)?.take(list.size as _))
+    }
+
+    pub fn get<R: MemReader>(self, reader: &R, index: usize) -> Option<T> {
+        let list = self.read(reader)?;
+        list.items.get(reader, index)
+    }
+
+    /// # Safety
+    ///
+    /// This function is essentialy a `transmute` and thus is unsafe.
+    /// All the safety requirements of `transmute` apply here.
+    pub unsafe fn as_slice<R: MemReader>(self, reader: &R) -> Option<&[T]> {
+        let list = self.read(reader)?;
+        let inner = list.items.as_slice(reader)?;
+        Some(&*(inner as *const [MaybeUninit<T>] as *const [T]))
+    }
+}
+
+impl<K: AnyBitPattern + 'static, V: AnyBitPattern + 'static> Pointer<Map<K, V>> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> Option<impl Iterator<Item = (K, V)> + '_> {
+        let map = self.read(reader)?;
+        Some(
+            map.entries
+                .iter(reader)?
+                .filter(|o| o._hash != 0 || o._next != 0)
+                .take(map.size as _)
+                .map(|o| (o.key, o.value)),
+        )
+    }
+}
+
+impl<T: AnyBitPattern + 'static> Pointer<Set<T>> {
+    pub fn iter<R: MemReader>(self, reader: &R) -> Option<impl Iterator<Item = T> + '_> {
+        Some(
+            // SAFETY: Set<T> is repr(transparent) and is the same as Map<T, ()>
+            unsafe { self.cast::<Map<T, ()>>() }
+                .iter(reader)?
+                .map(|o| o.0),
+        )
+    }
+}
+
+impl<T> From<Pointer<T>> for Address {
+    fn from(ptr: Pointer<T>) -> Self {
+        ptr.address.into()
+    }
+}
+
+impl<T> From<Pointer<T>> for Address64 {
+    fn from(ptr: Pointer<T>) -> Self {
+        ptr.address
+    }
+}
+
+impl<T> fmt::Debug for Pointer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pointer")
+            .field("address", &self.address)
+            .field("type", &core::any::type_name::<T>())
+            .finish()
+    }
+}
+
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Copy` bound, which is not required.
+impl<T> ::core::marker::Copy for Pointer<T> {}
+
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Clone` bound, which is not required.
+impl<T> ::core::clone::Clone for Pointer<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: AnyBitPattern` bound, which is not required.
+//
+// SAFETY:
+// Similar to raw pointers, a pointer is valid for any bit pattern
+// Dereferencing the pointer is not, though.
+unsafe impl<T: 'static> ::bytemuck::AnyBitPattern for Pointer<T> {}
+
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: Zeroable` bound, which is not required.
+//
+// SAFETY:
+// A zeroed pointer is the null pointer, and it is a valid pointer.
+// It must not be derreferenced, though.
+unsafe impl<T: 'static> ::bytemuck::Zeroable for Pointer<T> {}
+
+#[repr(C)]
+pub struct Array<T> {
+    _type_id: u64,
+    _header: u64,
+    _header2: u64,
+    size: u32,
+    _t: PhantomData<T>,
+}
+
+impl<T> Array<T> {
+    const DATA: u64 = 0x20;
+
+    pub const fn size(&self) -> u32 {
+        self.size
+    }
+}
+
+const _: () = {
+    assert!(size_of::<Array<()>>() == Array::<()>::DATA as usize);
+};
 
 pub struct ArrayIter<'a, T, R> {
-    pos: Address,
-    end: Address,
+    pos: Address64,
+    end: Address64,
     reader: &'a R,
     _t: PhantomData<T>,
 }
 
-impl<'a, T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<'a, T, R> {
+impl<'a, T: CheckedBitPattern, R: MemReader> Iterator for ArrayIter<'a, T, R> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -107,7 +263,7 @@ impl<'a, T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<'a, T, R> {
 
         let item: T = self.reader.read(self.pos)?;
 
-        self.pos = self.pos + core::mem::size_of::<T>() as u64;
+        self.pos = self.pos + size_of::<T>() as u64;
         Some(item)
     }
 
@@ -117,187 +273,201 @@ impl<'a, T: AnyBitPattern, R: MemReader> Iterator for ArrayIter<'a, T, R> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+impl<T> fmt::Debug for Array<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Array")
+            .field("size", &self.size)
+            .field("type", &core::any::type_name::<T>())
+            .finish()
+    }
+}
+
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Copy` bound, which is not required.
+impl<T> ::core::marker::Copy for Array<T> {}
+
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Clone` bound, which is not required.
+impl<T> ::core::clone::Clone for Array<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: AnyBitPattern` bound, which is not required.
+//
+// SAFETY:
+// While technically not any bit pattern is allowed, we are ignoring
+// the C# object header internals, so for the purpose of this type
+// they can indeed be anything.
+unsafe impl<T: 'static> ::bytemuck::AnyBitPattern for Array<T> {}
+
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: Zeroable` bound, which is not required.
+//
+// SAFETY:
+// Similar to the logic for AnyBitPattern, we accept zeroed values
+// because we only care about the size field and that one is ok
+// to be zero.
+unsafe impl<T: 'static> ::bytemuck::Zeroable for Array<T> {}
+
+#[repr(C)]
 pub struct CSString {
-    addr: Address,
+    _type_id: [u32; 2],
+    _header: [u32; 2],
     size: u32,
 }
 
 impl CSString {
-    const SIZE: u64 = 0x10;
     const DATA: u64 = 0x14;
+}
 
-    pub fn size(&self) -> u32 {
+const _: () = {
+    assert!(size_of::<CSString>() == CSString::DATA as usize);
+};
+
+impl CSString {
+    pub const fn size(&self) -> u32 {
         self.size
     }
+}
 
-    pub fn chars<R: MemReader>(self, reader: &R) -> impl Iterator<Item = char> + '_ {
-        let start = self.addr + Self::DATA;
-        let end = start + u64::from(2 * self.size);
-
-        let utf16 = ArrayIter {
-            pos: start,
-            end,
-            reader,
-            _t: PhantomData::<u16>,
-        };
-        char::decode_utf16(utf16).map(|o| o.unwrap_or(char::REPLACEMENT_CHARACTER))
+impl fmt::Debug for CSString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CSString")
+            .field("size", &self.size)
+            .finish()
     }
+}
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Copy` bound, which is not required.
+impl ::core::marker::Copy for CSString {}
 
-    pub fn to_string<R: MemReader, const CAP: usize>(self, reader: &R) -> ArrayString<CAP> {
-        let mut s = ArrayString::new();
-        for c in self.chars(reader) {
-            match s.try_push(c) {
-                Ok(()) => {}
-                Err(_) => break,
-            }
-        }
-        s
-    }
-
-    #[cfg(feature = "alloc")]
-    pub fn to_std_string<R: MemReader>(self, reader: &R) -> ::alloc::string::String {
-        self.chars(reader).collect()
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Clone` bound, which is not required.
+impl ::core::clone::Clone for CSString {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-impl Resolve for CSString {
-    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
-        let addr = addr.into();
-        let size = reader.read(addr + Self::SIZE)?;
-        Some(Self { addr, size })
-    }
-}
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: AnyBitPattern` bound, which is not required.
+unsafe impl ::bytemuck::AnyBitPattern for CSString {}
 
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: Zeroable` bound, which is not required.
+unsafe impl ::bytemuck::Zeroable for CSString {}
+
+#[repr(C)]
 pub struct List<T> {
-    addr: Address,
-    items: Array<T>,
+    _type_id: u64,
+    _header: u64,
+    items: Pointer<Array<T>>,
     size: u32,
 }
 
-impl<T> Copy for List<T> {}
-
-impl<T> Clone for List<T> {
-    fn clone(&self) -> Self {
-        *self
+impl<T> List<T> {
+    pub const fn size(&self) -> u32 {
+        self.size
     }
 }
 
 impl<T> fmt::Debug for List<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("List")
-            .field("addr", &self.addr)
             .field("items", &self.items)
             .field("size", &self.size)
             .finish()
     }
 }
 
-impl<T> List<T> {
-    const ITEMS: u64 = 0x10;
-    const SIZE: u64 = 0x18;
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Copy` bound, which is not required.
+impl<T> ::core::marker::Copy for List<T> {}
 
-    pub fn size(&self) -> u32 {
-        self.size
-    }
-}
-
-impl<T: AnyBitPattern + 'static> List<T> {
-    pub fn iter<R: MemReader>(self, reader: &R) -> impl Iterator<Item = T> + '_ {
-        self.items.iter(reader).take(self.size as _)
-    }
-
-    pub fn get<R: MemReader>(self, reader: &R, index: usize) -> Option<T> {
-        self.items.get(reader, index)
-    }
-
-    /// # Safety
-    ///
-    /// This function is essentialy a `transmute` and thus is unsafe.
-    /// All the safety requirements of `transmute` apply here.
-    pub unsafe fn as_slice<R: MemReader>(&self, reader: &R) -> Option<&[T]> {
-        let inner = unsafe { self.items.as_slice(reader)? };
-        let inner = &inner[..self.size as usize];
-        Some(unsafe { &*(inner as *const [MaybeUninit<T>] as *const [T]) })
-    }
-}
-
-impl<T: 'static> Resolve for List<T> {
-    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
-        let addr = addr.into();
-        let size = reader.read(addr + Self::SIZE)?;
-        let items = reader.read::<Address64, _>(addr + Self::ITEMS)?;
-        let items = Array::resolve(reader, items)?;
-        Some(Self { addr, items, size })
-    }
-}
-
-pub struct Map<K, V> {
-    addr: Address,
-    entries: Array<Entry<K, V>>,
-    size: u32,
-}
-
-impl<K, V> Copy for Map<K, V> {}
-
-impl<K, V> Clone for Map<K, V> {
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Clone` bound, which is not required.
+impl<T> ::core::clone::Clone for List<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: AnyBitPattern` bound, which is not required.
+unsafe impl<T: 'static> ::bytemuck::AnyBitPattern for List<T> {}
+
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: Zeroable` bound, which is not required.
+unsafe impl<T: 'static> ::bytemuck::Zeroable for List<T> {}
+
+#[repr(C)]
+pub struct Map<K, V> {
+    _type_id: u64,
+    _header: u64,
+    _header_2: u64,
+    entries: Pointer<Array<Entry<K, V>>>,
+    size: u32,
+}
+
+impl<K, V> Map<K, V> {
+    pub const fn size(&self) -> u32 {
+        self.size
+    }
+}
+
+#[derive(Copy, Clone, Debug, AnyBitPattern)]
+#[repr(C)]
+struct Entry<K, V> {
+    _hash: u32,
+    _next: u32,
+    key: K,
+    value: V,
+}
+
 impl<K, V> fmt::Debug for Map<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Map")
-            .field("addr", &self.addr)
             .field("entries", &self.entries)
             .field("size", &self.size)
             .finish()
     }
 }
 
-impl<K, V> Map<K, V> {
-    const ENTRIES: u64 = 0x18;
-    const SIZE: u64 = 0x20;
+// This is a manual implementation and not derived because the derive
+// implementation would add `K: Copy` and `V: Copy` bounds, which is
+// not required.
+impl<K, V> ::core::marker::Copy for Map<K, V> {}
 
-    pub fn size(&self) -> u32 {
-        self.size
+// This is a manual implementation and not derived because the derive
+// implementation would add `K: Clone` and `V: Clone` bounds, which is
+// not required.
+impl<K, V> ::core::clone::Clone for Map<K, V> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-impl<K: AnyBitPattern + 'static, V: AnyBitPattern + 'static> Map<K, V> {
-    pub fn iter<R: MemReader>(self, reader: &R) -> impl Iterator<Item = (K, V)> + '_ {
-        self.entries
-            .iter(reader)
-            .filter(|o| o._hash != 0 || o._next != 0)
-            .take(self.size as _)
-            .map(|o| (o.key, o.value))
-    }
-}
+// This is a manual implementation and not derived because the derive
+// macro would add `K: AnyBitPattern` and `V: AnyBitPattern` bounds,
+// which is not required.
+unsafe impl<K: 'static, V: 'static> ::bytemuck::AnyBitPattern for Map<K, V> {}
 
-impl<K: 'static, V: 'static> Resolve for Map<K, V> {
-    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
-        let addr = addr.into();
-        let size = reader.read(addr + Self::SIZE)?;
-        let entries = reader.read::<Address64, _>(addr + Self::ENTRIES)?;
-        let entries = Array::resolve(reader, entries)?; // reader.resolve(entries)?;
-        Some(Self {
-            addr,
-            entries,
-            size,
-        })
-    }
-}
+// This is a manual implementation and not derived because the derive
+// macro would add `K: Zeroable` and `V: Zeroable` bounds, which is
+// not required.
+unsafe impl<K: 'static, V: 'static> ::bytemuck::Zeroable for Map<K, V> {}
 
+#[repr(transparent)]
 pub struct Set<T> {
     map: Map<T, ()>,
 }
 
-impl<T> Copy for Set<T> {}
-
-impl<T> Clone for Set<T> {
-    fn clone(&self) -> Self {
-        *self
+impl<T> Set<T> {
+    pub const fn size(&self) -> u32 {
+        self.map.size
     }
 }
 
@@ -307,30 +477,22 @@ impl<T> fmt::Debug for Set<T> {
     }
 }
 
-impl<T> Set<T> {
-    pub fn size(&self) -> u32 {
-        self.map.size
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Copy` bound, which is not required.
+impl<T> ::core::marker::Copy for Set<T> {}
+
+// This is a manual implementation and not derived because the derive
+// implementation would add a `T: Clone` bound, which is not required.
+impl<T> ::core::clone::Clone for Set<T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
-impl<T: AnyBitPattern + 'static> Set<T> {
-    pub fn iter<R: MemReader>(self, reader: &R) -> impl Iterator<Item = T> + '_ {
-        self.map.iter(reader).map(|o| o.0)
-    }
-}
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: AnyBitPattern` bound, which is not required.
+unsafe impl<T: 'static> ::bytemuck::AnyBitPattern for Set<T> {}
 
-impl<T: 'static> Resolve for Set<T> {
-    fn resolve<R: MemReader, A: Into<Address>>(reader: &R, addr: A) -> Option<Self> {
-        let map = Map::resolve(reader, addr)?;
-        Some(Self { map })
-    }
-}
-
-#[derive(Copy, Clone, Debug, AnyBitPattern)]
-#[repr(C)]
-pub struct Entry<K, V> {
-    _hash: u32,
-    _next: u32,
-    pub key: K,
-    pub value: V,
-}
+// This is a manual implementation and not derived because the derive
+// macro would add a `T: Zeroable` bound, which is not required.
+unsafe impl<T: 'static> ::bytemuck::Zeroable for Set<T> {}

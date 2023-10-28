@@ -6,9 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-arrayvec = { version = "0.7.4", default-features = false }
 bytemuck = { version = "1.14.0", features = ["derive"] }
-asr = { git = "https://github.com/knutwalker/asr", branch = "new-derive", features = [
+asr = { git = "https://github.com/knutwalker/asr", branch = "sos-as", features = [
     "unity",
 ] }
 
