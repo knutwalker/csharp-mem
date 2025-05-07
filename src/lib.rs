@@ -157,6 +157,11 @@ impl<T> Pointer<T> {
         self.address
     }
 
+    /// Return the address of this pointer as generic `Address`.
+    pub fn addr(self) -> Address {
+        self.address.into()
+    }
+
     const unsafe fn cast<U>(self) -> Pointer<U> {
         Pointer {
             address: self.address,
