@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 bytemuck = { version = "1.14.0", features = ["derive"] }
-asr = { git = "https://github.com/knutwalker/asr", branch = "sos-as", features = [
+asr = { git = "https://github.com/knutwalker/asr", branch = "sos-as2", features = [
     "unity",
 ] }
 csharp-mem-derive = { path = "derive" }
